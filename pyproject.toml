@@ -16,7 +16,7 @@ dependencies = [
 # green suite with no download and no network. Only the results script wants
 # real MiniLM vectors, and it records in its own header which embedder it used.
 embeddings = ["sentence-transformers>=3.0"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff==0.14.3"]
 
 [tool.uv.sources]
 llm-eval-harness = { path = "../llm-eval-harness", editable = true }
