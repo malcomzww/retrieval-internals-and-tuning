@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,14 +146,131 @@ def build_corpus(n_docs: int = 20_000, *, seed: int = 0) -> list[Document]:
     return docs
 
 
-def build_queries(docs: list[Document], n_queries: int = 200, *, seed: int = 1) -> list[str]:
-    """Queries phrased as questions over corpus terminology.
+QUERY_TEMPLATE = "why does the {a} affect the {b} in production"
 
-    Deliberately *not* verbatim document text. A query that is a copy of a
-    document has a trivial nearest neighbour at distance zero, and every index
-    finds it; recall would be pinned at 1.0 and the sweep would show nothing.
-    These recombine terms across frames so the true neighbour set is a genuine
-    contest between several similar passages.
+# Paraphrases of the topic terms, used to build queries that do NOT contain the
+# document's literal wording. Without this the whole re-ranking comparison is
+# degenerate: a query built from the same strings that define relevance is
+# solved perfectly by exact term matching, every arm scores NDCG 1.0, and there
+# is no headroom in which a crossover could appear. Vocabulary mismatch between
+# query and document is also the actual reason dense retrieval is worth its
+# cost in production, so a corpus without it cannot measure retrieval at all.
+_PARAPHRASE: dict[str, str] = {
+    "write-ahead log": "transaction journal",
+    "page cache": "buffer pool",
+    "compaction": "segment merging",
+    "durability": "crash safety",
+    "checkpoint": "flush barrier",
+    "replication lag": "follower delay",
+    "fsync": "disk flush",
+    "tablespace": "storage volume",
+    "vacuum": "dead tuple cleanup",
+    "bloom filter": "membership sketch",
+    "congestion window": "send quota",
+    "packet loss": "dropped datagrams",
+    "handshake": "session setup",
+    "round trip": "echo delay",
+    "load balancer": "traffic director",
+    "keepalive": "liveness probe",
+    "backpressure": "flow throttling",
+    "multiplexing": "stream sharing",
+    "retransmission": "resend attempt",
+    "jumbo frame": "oversized packet",
+    "inverted index": "term dictionary",
+    "term frequency": "word count weighting",
+    "posting list": "document id run",
+    "recall curve": "coverage trade-off",
+    "nearest neighbour": "closest vector",
+    "quantisation": "code compression",
+    "embedding drift": "vector staleness",
+    "re-ranking": "second pass ordering",
+    "candidate set": "shortlist",
+    "query latency": "response delay",
+    "work stealing": "idle task pulling",
+    "priority inversion": "rank reversal",
+    "context switch": "task swap",
+    "time slice": "quantum",
+    "starvation": "indefinite postponement",
+    "affinity mask": "core pinning",
+    "run queue": "ready list",
+    "preemption": "forced yield",
+    "deadline miss": "late completion",
+    "thread pool": "worker group",
+    "certificate chain": "trust path",
+    "key rotation": "credential refresh",
+    "replay attack": "message resend abuse",
+    "constant time": "timing invariant",
+    "privilege escalation": "rights elevation",
+    "audit log": "activity trail",
+    "token expiry": "credential timeout",
+    "side channel": "indirect leak",
+    "sandbox escape": "isolation breakout",
+    "nonce reuse": "counter repetition",
+}
+
+
+def query_terms(query: str) -> tuple[str, str]:
+    """Recover the two topic terms a query was built from.
+
+    Exists so that relevance can be defined *independently of any embedding*.
+    See :func:`term_relevance` for why that independence is the difference
+    between a measurement and a tautology.
+    """
+    match = re.fullmatch(r"why does the (.+) affect the (.+) in production", query)
+    if match is None:
+        raise ValueError(f"not a generated query: {query!r}")
+    return match.group(1), match.group(2)
+
+
+def term_relevance(docs: list[Document], queries: list[str]) -> list[list[int]]:
+    """Relevant document ids per query: those mentioning *both* query terms.
+
+    This is the ground truth the re-ranking comparison needs, and getting it
+    from the corpus generator rather than from a model is the whole point.
+
+    The first version of that comparison defined relevance as the exact
+    embedding ranking. Every retrieval arm then scored NDCG 1.0000 by
+    construction -- the retriever was being graded against the very ordering it
+    approximates -- and no re-ranker could do anything but lose. That is not a
+    finding about re-ranking; it is a broken experiment, and it would have been
+    easy to publish as "re-ranking never pays".
+
+    Relevance here is a property of the *text*: a passage is relevant to
+    "why does the checkpoint affect the replication lag" when it actually
+    discusses both the checkpoint and the replication lag. Both the retriever
+    and the re-ranker are then measured against something neither one defines,
+    which is the minimum bar for the comparison to mean anything.
+    """
+    inverse = {phrase: term for term, phrase in _PARAPHRASE.items()}
+    relevant: list[list[int]] = []
+    for query in queries:
+        first, second = query_terms(query)
+        # Queries are paraphrased, documents are not, so each query term is
+        # resolved back to the corpus wording before matching. A paraphrase
+        # that is not in the map is used as-is, which is what makes
+        # `paraphrase=False` queries work through the same code path.
+        first = inverse.get(first, first)
+        second = inverse.get(second, second)
+        relevant.append(
+            [d.doc_id for d in docs if first in d.text and second in d.text]
+        )
+    return relevant
+
+
+def build_queries(
+    docs: list[Document], n_queries: int = 200, *, seed: int = 1, paraphrase: bool = True
+) -> list[str]:
+    """Queries over corpus concepts, worded differently from the documents.
+
+    With ``paraphrase=True`` (the default) each topic term is replaced by a
+    synonym that appears nowhere in the corpus, so a query asking about the
+    "flush barrier" and "follower delay" must be matched to documents saying
+    "checkpoint" and "replication lag". That gap is the point: it is why dense
+    retrieval earns its cost over exact term matching, and without it every
+    retrieval method scores identically and no comparison is possible.
+
+    ``paraphrase=False`` keeps the literal terms and is retained to *show* the
+    degenerate case rather than to hide it -- the results script reports both.
     """
     rng = np.random.default_rng(seed)
     cats = list(CATEGORIES)
@@ -161,7 +279,9 @@ def build_queries(docs: list[Document], n_queries: int = 200, *, seed: int = 1) 
         category = cats[i % len(cats)]
         vocab = _TOPICS[category]
         a, b = rng.choice(vocab, size=2, replace=False)
-        out.append(f"why does the {a} affect the {b} in production")
+        if paraphrase:
+            a, b = _PARAPHRASE[str(a)], _PARAPHRASE[str(b)]
+        out.append(QUERY_TEMPLATE.format(a=a, b=b))
     return out
 
 

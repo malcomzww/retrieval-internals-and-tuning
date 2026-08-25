@@ -25,11 +25,18 @@ Two re-rankers are provided:
   rather than a uniform win.
 
 The quality metric here is deliberately *not* ANN recall. Re-ranking reorders a
-candidate set; it cannot add a document the retriever missed, so its recall@k
-against the ANN ground truth can only fall. The right measure is against
-*relevance*, and :func:`relevance_labels` derives that from the exact
-embedding ranking -- the best available stand-in when no human labels exist,
-and named as such rather than dressed up as truth.
+candidate set; it cannot add a document the retriever missed, so its recall
+against the *ANN* ground truth can only fall. Quality is measured instead
+against :func:`~.corpus.term_relevance` -- documents that genuinely discuss
+both terms the query asks about -- which is a property of the corpus text and
+independent of any embedding.
+
+That independence is not a detail. An earlier version of this module defined
+relevance as the exact embedding ranking, and every retrieval arm scored NDCG
+1.0000 by construction: the retriever was graded against the ordering it
+exists to approximate, so re-ranking could only ever lose. The conclusion
+"re-ranking never pays at any budget" fell straight out of the setup and had
+nothing to do with re-ranking.
 """
 
 from __future__ import annotations
@@ -52,23 +59,15 @@ def tokenise(text: str) -> list[str]:
     return _TOKEN.findall(text.lower())
 
 
-def relevance_labels(
+def embedding_rank_labels(
     doc_vectors: np.ndarray, query_vectors: np.ndarray, *, depth: int = 20
 ) -> list[list[int]]:
-    """Relevance sets: the exact top-``depth`` neighbours of each query.
+    """The exact top-``depth`` embedding neighbours of each query.
 
-    An honest description of what this is and is not. It is not human
-    relevance; it is the ranking an exhaustive search over these embeddings
-    would produce. Using it means every quality number in this module is
-    measured against *the embedding model's own opinion*, which has a specific
-    consequence worth stating plainly: it structurally favours the retriever
-    over the re-ranker, because the retriever is approximating exactly this
-    ordering while the cross-encoder is trying to improve on it.
-
-    So a measured cross-encoder gain here is a *lower bound* on its real gain,
-    and a measured loss might be the cross-encoder disagreeing with MiniLM
-    rather than being wrong. The crossover this repo reports inherits that
-    caveat, and the README says so.
+    Kept, but **not** for scoring the re-ranking comparison -- see the module
+    docstring for why doing that produces a tautology. Its legitimate use is as
+    the ANN ground truth for :mod:`.sweep`, where the question genuinely is
+    "did the approximate index find what exhaustive search would have found".
     """
     return [[int(x) for x in row] for row in FlatIndex(doc_vectors).search(query_vectors, depth)]
 
@@ -188,15 +187,19 @@ def _score_arm(
     candidates: int,
     reranker: str,
 ) -> Arm:
+    # The full relevance set is passed to both metrics, never a truncation of
+    # it. `ndcg_at_k` already caps its ideal ranking at k, so truncating the
+    # labels first would only corrupt the *gain* term by discarding relevant
+    # documents that the ranking legitimately found.
     per_query = [
-        ndcg_at_k(ranking, labels[:k], k)
+        ndcg_at_k(ranking, labels, k)
         for ranking, labels in zip(rankings, relevant, strict=True)
     ]
     return Arm(
         name=name,
         latency_ms=latency_ms,
         ndcg=sum(per_query) / len(per_query),
-        mrr_score=mrr(rankings, [labels[:k] for labels in relevant]),
+        mrr_score=mrr(rankings, relevant),
         per_query_ndcg=per_query,
         candidates=candidates,
         reranker=reranker,
