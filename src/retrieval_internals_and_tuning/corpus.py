@@ -79,6 +79,15 @@ _DETAILS = [
 CATEGORIES = tuple(_TOPICS)
 YEARS = (2019, 2020, 2021, 2022, 2023, 2024)
 
+# Tenant ids exist to give the filtering experiment a selectivity knob that is
+# statistically independent of both topic and year. Deriving selectivity from
+# `doc_id % n` instead looks equivalent and is not: categories are assigned
+# round-robin over five values, so `doc_id % 5` is perfectly aliased to
+# category, and a "0.7% filter" built that way silently keeps 3.3% of one
+# category. Tenants are assigned from a stride coprime with both 5 and 6, so
+# every (tenant, category, year) cell is populated in proportion.
+N_TENANTS = 64
+
 
 @dataclass(frozen=True)
 class Document:
@@ -88,6 +97,7 @@ class Document:
     text: str
     category: str
     year: int
+    tenant: int
 
 
 def build_corpus(n_docs: int = 20_000, *, seed: int = 0) -> list[Document]:
@@ -130,7 +140,8 @@ def build_corpus(n_docs: int = 20_000, *, seed: int = 0) -> list[Document]:
         # number in this repo. The clause also gives BM25 discriminative terms.
         detail = rng.choice(_DETAILS)
         docs.append(Document(doc_id=i, text=f"{text} {detail} Case {i:06d}.",
-                             category=category, year=YEARS[i % len(YEARS)]))
+                             category=category, year=YEARS[i % len(YEARS)],
+                             tenant=(i * 7) % N_TENANTS))
     return docs
 
 
