@@ -11,3 +11,9 @@ build/
 .env.*
 !.env.example
 .DS_Store
+
+# Embedding cache: derived, large, and machine-local.
+.cache/
+
+# Absolute latency numbers are machine-dependent and must not be committed.
+results/*-raw.md

@@ -3,13 +3,26 @@ name = "retrieval-internals-and-tuning"
 version = "0.1.0"
 description = "HNSW and IVF-PQ parameter sweeps producing real recall-vs-latency curves, the filtered-ANN problem demonstrated, and a measured answer to whether re-ranking is worth its latency."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "llm-eval-harness",
+    "numpy>=1.26",
+    "faiss-cpu>=1.8",
+    "rank-bm25>=0.2.2",
+]
 
 [project.optional-dependencies]
+# The model is optional on purpose. Every test runs on the deterministic
+# hashed-fallback embedder, so `uv sync --extra dev` on a clean machine gives a
+# green suite with no download and no network. Only the results script wants
+# real MiniLM vectors, and it records in its own header which embedder it used.
+embeddings = ["sentence-transformers>=3.0"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
+[tool.uv.sources]
+llm-eval-harness = { path = "../llm-eval-harness", editable = true }
+
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "../llm-eval-harness/src"]
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -18,3 +31,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retrieval_internals_and_tuning"]
